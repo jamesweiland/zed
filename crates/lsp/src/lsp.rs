@@ -1136,6 +1136,9 @@ impl LanguageServer {
                 experimental: Some(json!({
                     "serverStatusNotification": true,
                     "localDocs": true,
+                    "interactiveResolve": {
+                        "inputTypes": ["string", "bool", "number", "enum"]
+                    },
                 })),
                 window: Some(WindowClientCapabilities {
                     work_done_progress: Some(true),

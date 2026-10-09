@@ -18,6 +18,7 @@ mod dynamic_registration;
 pub mod emmet_ext;
 mod folding_ranges;
 mod inlay_hints;
+pub mod interactive_resolve;
 pub mod json_language_server_ext;
 pub mod log_store;
 pub mod lsp_ext_command;
