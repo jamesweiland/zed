@@ -1,7 +1,19 @@
 //! Experimental interactive command resolution (`command/resolve`), as implemented by gopls:
 //! https://github.com/golang/tools/blob/master/gopls/doc/design/integrating-interactive-refactoring.md
 
+use lsp::ServerCapabilities;
 use serde::{Deserialize, Serialize};
+
+/// See https://github.com/golang/tools/blob/master/gopls/doc/design/integrating-interactive-refactoring.md
+pub fn supports_command_resolve(capabilities: &ServerCapabilities) -> bool {
+    capabilities
+        .experimental
+        .as_ref()
+        .and_then(|experimental| experimental.get("interactiveResolveProvider"))
+        .and_then(|provider| provider.get("kinds"))
+        .and_then(|kinds| kinds.as_array())
+        .is_some_and(|kinds| kinds.iter().any(|kind| kind.as_str() == Some("command")))
+}
 
 /// Resolves `ExecuteCommandParams` interactively, looping until the server returns no `formFields`.
 pub enum CommandResolve {}
@@ -172,6 +184,42 @@ pub struct InteractiveListEnumParams {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn test_supports_command_resolve() {
+        let supports = |experimental: serde_json::Value| {
+            supports_command_resolve(&ServerCapabilities {
+                experimental: Some(experimental),
+                ..Default::default()
+            })
+        };
+
+        assert!(supports(json!({
+            "interactiveResolveProvider": {
+                "kinds": [
+                    "command"
+                ]
+            }
+        })));
+        assert!(!supports(json!({})));
+        assert!(!supports(json!({
+            "interactiveResolveProvider": {
+                "kinds": [
+                    "not command"
+                ]
+            }
+        })));
+        assert!(supports(json!({
+            "interactiveResolveProvider": {
+                "kinds": [
+                    "not command",
+                    "command"
+                ]
+            }
+        })));
+
+        assert!(!supports_command_resolve(&ServerCapabilities::default()));
+    }
 
     #[test]
     fn test_command_resolve_params_round_trip() {

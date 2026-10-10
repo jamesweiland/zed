@@ -6660,6 +6660,104 @@ impl LspStore {
         }
     }
 
+    pub fn resolve_lsp_command(
+        &self,
+        server_id: LanguageServerId,
+        params: interactive_resolve::CommandResolveParams,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<interactive_resolve::CommandResolveParams>> {
+        let server =
+            match self.interactive_resolve_server(server_id, &params.execute_command.command) {
+                Ok(server) => server,
+                Err(error) => return Task::ready(Err(error)),
+            };
+        let request_timeout = ProjectSettings::get_global(cx)
+            .global_lsp_settings
+            .get_request_timeout();
+        cx.background_spawn(async move {
+            server
+                .request::<interactive_resolve::CommandResolve>(params, request_timeout)
+                .await
+                .into_response()
+        })
+    }
+
+    pub fn execute_resolved_lsp_command(
+        &mut self,
+        server_id: LanguageServerId,
+        params: interactive_resolve::CommandResolveParams,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<ProjectTransaction>> {
+        let server =
+            match self.interactive_resolve_server(server_id, &params.execute_command.command) {
+                Ok(server) => server,
+                Err(error) => return Task::ready(Err(error)),
+            };
+        if let Some(local) = self.as_local_mut() {
+            local
+                .last_workspace_edits_by_language_server
+                .remove(&server_id);
+        }
+        let request_timeout = ProjectSettings::get_global(cx)
+            .global_lsp_settings
+            .get_request_timeout();
+        cx.spawn(async move |this, cx| {
+            server
+                .request::<interactive_resolve::ExecuteResolvedCommand>(params, request_timeout)
+                .await
+                .into_response()
+                .context("executing resolved command")?;
+            this.update(cx, |this, _| {
+                this.as_local_mut()
+                    .and_then(|local| {
+                        local
+                            .last_workspace_edits_by_language_server
+                            .remove(&server_id)
+                    })
+                    .unwrap_or_default()
+            })
+        })
+    }
+
+    fn interactive_resolve_server(
+        &self,
+        server_id: LanguageServerId,
+        command: &str,
+    ) -> Result<Arc<LanguageServer>> {
+        if self.upstream_client().is_some() {
+            return Err(anyhow!(
+                "Interactive command resolution is not supported for remote projects yet"
+            ));
+        }
+        if !self.mode.is_local() {
+            return Err(anyhow!("No upstream client and not local"));
+        }
+        let server = self
+            .language_server_for_id(server_id)
+            .with_context(|| format!("language server {server_id} not found"))?;
+        let capabilities = server.capabilities();
+        if !capabilities
+            .execute_command_provider
+            .as_ref()
+            .is_some_and(|options| {
+                options
+                    .commands
+                    .iter()
+                    .any(|advertised| advertised == command)
+            })
+        {
+            return Err(anyhow!(
+                "command {command} is not advertised by the language server"
+            ));
+        }
+        if !interactive_resolve::supports_command_resolve(&capabilities) {
+            return Err(anyhow!(
+                "language server {server_id} does not support command/resolve"
+            ));
+        }
+        Ok(server)
+    }
+
     pub fn execute_lsp_command(
         &self,
         server_id: LanguageServerId,

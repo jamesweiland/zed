@@ -1201,3 +1201,195 @@ fn worktree_entries(project: &Entity<Project>, cx: &TestAppContext) -> Vec<Strin
             .collect()
     })
 }
+
+async fn start_interactive_resolve_server(
+    experimental: Option<serde_json::Value>,
+    cx: &mut TestAppContext,
+) -> (Entity<Project>, lsp::FakeLanguageServer) {
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/root"), json!({ "main.rs": "fn main() {}" }))
+        .await;
+    let project = Project::test(fs, [path!("/root").as_ref()], cx).await;
+    let language_registry = project.read_with(cx, |project, _| project.languages().clone());
+    language_registry.add(rust_lang());
+    let mut fake_servers = language_registry.register_fake_lsp(
+        "Rust",
+        FakeLspAdapter {
+            capabilities: lsp::ServerCapabilities {
+                execute_command_provider: Some(lsp::ExecuteCommandOptions {
+                    commands: vec!["the/command".to_string()],
+                    ..Default::default()
+                }),
+                experimental,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    );
+    let (_buffer, _handle) = project
+        .update(cx, |project, cx| {
+            project.open_local_buffer_with_lsp(path!("/root/main.rs"), cx)
+        })
+        .await
+        .unwrap();
+    let fake_server = fake_servers.next().await.unwrap();
+    cx.run_until_parked();
+    (project, fake_server)
+}
+
+fn command_resolve_params(command: &str) -> interactive_resolve::CommandResolveParams {
+    interactive_resolve::CommandResolveParams {
+        execute_command: lsp::ExecuteCommandParams {
+            command: command.to_string(),
+            arguments: vec![json!("the-argument")],
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+#[gpui::test]
+async fn test_resolve_and_execute_lsp_command(cx: &mut TestAppContext) {
+    init_test(cx);
+    let (project, fake_server) = start_interactive_resolve_server(
+        Some(json!({ "interactiveResolveProvider": { "kinds": ["command"] } })),
+        cx,
+    )
+    .await;
+    let server_id = fake_server.server.server_id();
+    let lsp_store = project.read_with(cx, |project, _| project.lsp_store());
+
+    // Mirrors gopls: ask for a form until answers arrive, then return no fields.
+    fake_server.set_request_handler::<interactive_resolve::CommandResolve, _, _>(
+        |mut params, _| async move {
+            assert_eq!(params.execute_command.arguments, vec![json!("the-argument")]);
+            params.interactive.form_fields = if params.interactive.form_answers.is_empty() {
+                vec![interactive_resolve::FormField {
+                    id: "name".to_string(),
+                    description: "the name".to_string(),
+                    field_type: interactive_resolve::FormFieldType::String,
+                    required: true,
+                    default: None,
+                    error: None,
+                }]
+            } else {
+                Vec::new()
+            };
+            Ok(params)
+        },
+    );
+
+    let response = lsp_store
+        .update(cx, |lsp_store, cx| {
+            lsp_store.resolve_lsp_command(server_id, command_resolve_params("the/command"), cx)
+        })
+        .await
+        .unwrap();
+    assert_eq!(response.interactive.form_fields.len(), 1);
+    assert_eq!(response.interactive.form_fields[0].id, "name");
+
+    let mut answered = response;
+    answered.interactive.form_fields.clear();
+    answered.interactive.form_answers = vec![interactive_resolve::FormAnswer {
+        id: "name".to_string(),
+        value: json!("foo"),
+    }];
+    let resolved = lsp_store
+        .update(cx, |lsp_store, cx| {
+            lsp_store.resolve_lsp_command(server_id, answered, cx)
+        })
+        .await
+        .unwrap();
+    assert!(resolved.interactive.form_fields.is_empty());
+
+    // Like gopls, the server applies its changes with `workspace/applyEdit` while executing.
+    fake_server.set_request_handler::<interactive_resolve::ExecuteResolvedCommand, _, _>({
+        let server = fake_server.server.clone();
+        move |params, _| {
+            let server = server.clone();
+            async move {
+                assert_eq!(params.execute_command.command, "the/command");
+                assert_eq!(
+                    params.interactive.form_answers,
+                    vec![interactive_resolve::FormAnswer {
+                        id: "name".to_string(),
+                        value: json!("foo"),
+                    }]
+                );
+                server
+                    .request::<lsp::request::ApplyWorkspaceEdit>(
+                        lsp::ApplyWorkspaceEditParams {
+                            label: None,
+                            edit: lsp::WorkspaceEdit {
+                                changes: Some(
+                                    [(
+                                        Uri::from_file_path(path!("/root/main.rs")).unwrap(),
+                                        vec![lsp::TextEdit {
+                                            range: lsp::Range::new(
+                                                lsp::Position::new(0, 0),
+                                                lsp::Position::new(0, 0),
+                                            ),
+                                            new_text: "X".into(),
+                                        }],
+                                    )]
+                                    .into_iter()
+                                    .collect(),
+                                ),
+                                ..Default::default()
+                            },
+                        },
+                        lsp::DEFAULT_LSP_REQUEST_TIMEOUT,
+                    )
+                    .await
+                    .into_response()
+                    .unwrap();
+                Ok(Some(json!(null)))
+            }
+        }
+    });
+    let transaction = lsp_store
+        .update(cx, |lsp_store, cx| {
+            lsp_store.execute_resolved_lsp_command(server_id, resolved, cx)
+        })
+        .await
+        .unwrap();
+    let edited_texts = transaction
+        .0
+        .keys()
+        .map(|buffer| buffer.read_with(cx, |buffer, _| buffer.text()))
+        .collect::<Vec<_>>();
+    assert_eq!(edited_texts, vec!["Xfn main() {}".to_string()]);
+}
+
+#[gpui::test]
+async fn test_resolve_lsp_command_rejects_unsupported_requests(cx: &mut TestAppContext) {
+    init_test(cx);
+    let (project, fake_server) = start_interactive_resolve_server(None, cx).await;
+    let server_id = fake_server.server.server_id();
+    let lsp_store = project.read_with(cx, |project, _| project.lsp_store());
+
+    let resolve = lsp_store.update(cx, |lsp_store, cx| {
+        lsp_store.resolve_lsp_command(server_id, command_resolve_params("the/command"), cx)
+    });
+    let error = resolve.await.unwrap_err().to_string();
+    assert!(error.contains("does not support command/resolve"), "{error}");
+
+    let execute = lsp_store.update(cx, |lsp_store, cx| {
+        lsp_store.execute_resolved_lsp_command(server_id, command_resolve_params("the/command"), cx)
+    });
+    let error = execute.await.unwrap_err().to_string();
+    assert!(error.contains("does not support command/resolve"), "{error}");
+
+    let (project, fake_server) = start_interactive_resolve_server(
+        Some(json!({ "interactiveResolveProvider": { "kinds": ["command"] } })),
+        cx,
+    )
+    .await;
+    let server_id = fake_server.server.server_id();
+    let lsp_store = project.read_with(cx, |project, _| project.lsp_store());
+    let unadvertised = lsp_store.update(cx, |lsp_store, cx| {
+        lsp_store.resolve_lsp_command(server_id, command_resolve_params("other/command"), cx)
+    });
+    let error = unadvertised.await.unwrap_err().to_string();
+    assert!(error.contains("is not advertised"), "{error}");
+}
