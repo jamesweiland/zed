@@ -50445,3 +50445,122 @@ async fn test_soft_wrap_indent_updated_on_file_move_between_directories(
         .unwrap();
     assert_eq!(snapshot.soft_wrap_indent(DisplayRow(0)), Some(0));
 }
+
+#[gpui::test]
+async fn test_interactive_code_action_resolves_command_before_executing(cx: &mut TestAppContext) {
+    use project::lsp_store::interactive_resolve;
+
+    init_test(cx, |_| {});
+    let mut cx = EditorLspTestContext::new_rust(
+        lsp::ServerCapabilities {
+            code_action_provider: Some(lsp::CodeActionProviderCapability::Simple(true)),
+            execute_command_provider: Some(lsp::ExecuteCommandOptions {
+                commands: vec!["the/command".to_string()],
+                ..Default::default()
+            }),
+            experimental: Some(json!({ "interactiveResolveProvider": { "kinds": ["command"] } })),
+            ..Default::default()
+        },
+        cx,
+    )
+    .await;
+    cx.set_state("ˇfn main() {}");
+
+    let mut code_action_requests = cx.set_request_handler::<lsp::request::CodeActionRequest, _, _>(
+        |_, _, _| async move {
+            Ok(Some(vec![lsp::CodeActionOrCommand::Command(lsp::Command {
+                title: "Interactive command".to_string(),
+                command: "the/command".to_string(),
+                arguments: None,
+            })]))
+        },
+    );
+    cx.update_editor(|editor, window, cx| {
+        editor.toggle_code_actions(
+            &ToggleCodeActions {
+                deployed_from: None,
+                quick_launch: false,
+            },
+            window,
+            cx,
+        );
+    });
+    code_action_requests.next().await;
+    cx.run_until_parked();
+    cx.condition(|editor, _| editor.context_menu_visible())
+        .await;
+
+    // Asks for a name until it gets one, like gopls.
+    cx.lsp
+        .set_request_handler::<interactive_resolve::CommandResolve, _, _>(
+            |mut params, _| async move {
+                params.interactive.form_fields = if params.interactive.form_answers.is_empty() {
+                    vec![interactive_resolve::FormField {
+                        id: "name".to_string(),
+                        description: "the name".to_string(),
+                        field_type: interactive_resolve::FormFieldType::String,
+                        required: true,
+                        default: Some(json!("X")),
+                        error: None,
+                    }]
+                } else {
+                    Vec::new()
+                };
+                Ok(params)
+            },
+        );
+    cx.lsp
+        .set_request_handler::<interactive_resolve::ExecuteResolvedCommand, _, _>({
+            let server = cx.lsp.server.clone();
+            let buffer_lsp_url = cx.buffer_lsp_url.clone();
+            move |params, _| {
+                let server = server.clone();
+                let buffer_lsp_url = buffer_lsp_url.clone();
+                async move {
+                    assert_eq!(
+                        params.interactive.form_answers,
+                        vec![interactive_resolve::FormAnswer {
+                            id: "name".to_string(),
+                            value: json!("X"),
+                        }]
+                    );
+                    server
+                        .request::<lsp::request::ApplyWorkspaceEdit>(
+                            lsp::ApplyWorkspaceEditParams {
+                                label: None,
+                                edit: lsp::WorkspaceEdit {
+                                    changes: Some(
+                                        [(
+                                            buffer_lsp_url,
+                                            vec![lsp::TextEdit {
+                                                range: lsp::Range::new(
+                                                    lsp::Position::new(0, 0),
+                                                    lsp::Position::new(0, 0),
+                                                ),
+                                                new_text: "X".into(),
+                                            }],
+                                        )]
+                                        .into_iter()
+                                        .collect(),
+                                    ),
+                                    ..Default::default()
+                                },
+                            },
+                            DEFAULT_LSP_REQUEST_TIMEOUT,
+                        )
+                        .await
+                        .into_response()
+                        .unwrap();
+                    Ok(Some(json!(null)))
+                }
+            }
+        });
+
+    let confirm = cx
+        .update_editor(|editor, window, cx| {
+            editor.confirm_code_action(&ConfirmCodeAction { item_ix: Some(0) }, window, cx)
+        })
+        .expect("confirming a code action should spawn a task");
+    confirm.await.unwrap();
+    assert_eq!(cx.buffer_text(), "Xfn main() {}");
+}

@@ -260,6 +260,16 @@ impl Editor {
                 if code_lens::try_handle_client_command(&action, self, &workspace, window, cx) {
                     return Some(Task::ready(Ok(())));
                 }
+                if let Some(task) = self.apply_interactive_code_action(
+                    buffer.clone(),
+                    action.clone(),
+                    title.clone(),
+                    &workspace,
+                    window,
+                    cx,
+                ) {
+                    return Some(task);
+                }
 
                 let apply_code_action =
                     provider.apply_code_action(buffer, action, true, window, cx);
