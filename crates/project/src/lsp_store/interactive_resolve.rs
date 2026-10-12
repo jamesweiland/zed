@@ -69,6 +69,7 @@ pub struct FormEnumEntry {
 pub struct FormFieldTypeEnum {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(default, deserialize_with = "null_as_default")]
     pub entries: Vec<FormEnumEntry>,
 }
 
@@ -118,7 +119,11 @@ pub struct FormFieldTypeFile {
     #[serde(rename = "type")]
     pub file_type: FileType,
     /// Allowed extensions without the leading dot; empty means any.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "null_as_default",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub filters: Vec<String>,
 }
 
@@ -154,9 +159,17 @@ pub struct FormAnswer {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InteractiveParams {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "null_as_default",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub form_fields: Vec<FormField>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "null_as_default",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub form_answers: Vec<FormAnswer>,
 }
 
@@ -180,10 +193,56 @@ pub struct InteractiveListEnumParams {
     pub query: String,
 }
 
+/// Deserializes an explicit `null` as the type's default, since Go servers like gopls encode empty slices as `null`.
+fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn test_null_lists_deserialize_as_empty() {
+        let file: FormFieldType = serde_json::from_value(json!({
+            "kind": "file",
+            "existence": 1,
+            "type": 1,
+            "filters": null
+        }))
+        .unwrap();
+        assert_eq!(
+            file,
+            FormFieldType::File(FormFieldTypeFile {
+                existence: FileExistence::NEW,
+                file_type: FileType::REGULAR,
+                filters: Vec::new(),
+            })
+        );
+
+        let enum_type: FormFieldType =
+            serde_json::from_value(json!({ "kind": "enum", "entries": null })).unwrap();
+        assert_eq!(
+            enum_type,
+            FormFieldType::Enum(FormFieldTypeEnum {
+                name: None,
+                entries: Vec::new(),
+            })
+        );
+
+        let params: CommandResolveParams = serde_json::from_value(json!({
+            "command": "the/command",
+            "formFields": null,
+            "formAnswers": null
+        }))
+        .unwrap();
+        assert_eq!(params.interactive, InteractiveParams::default());
+    }
 
     #[test]
     fn test_supports_command_resolve() {
