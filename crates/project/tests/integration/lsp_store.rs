@@ -1393,3 +1393,50 @@ async fn test_resolve_lsp_command_rejects_unsupported_requests(cx: &mut TestAppC
     let error = unadvertised.await.unwrap_err().to_string();
     assert!(error.contains("is not advertised"), "{error}");
 }
+
+#[gpui::test]
+async fn test_list_interactive_enum(cx: &mut TestAppContext) {
+    init_test(cx);
+    let (project, fake_server) = start_interactive_resolve_server(
+        Some(json!({ "interactiveResolveProvider": { "kinds": ["command"] } })),
+        cx,
+    )
+    .await;
+    let server_id = fake_server.server.server_id();
+    let lsp_store = project.read_with(cx, |project, _| project.lsp_store());
+
+    fake_server.set_request_handler::<interactive_resolve::InteractiveListEnum, _, _>(
+        |params, _| async move {
+            assert_eq!(params.source, "workspace/symbol");
+            assert_eq!(params.config, Some(json!({ "limit": 1 })));
+            Ok(interactive_resolve::FormFieldTypeEnum {
+                name: None,
+                entries: vec![interactive_resolve::FormEnumEntry {
+                    value: params.query.clone(),
+                    description: format!("Symbol {}", params.query),
+                }],
+            })
+        },
+    );
+    let options = lsp_store
+        .update(cx, |lsp_store, cx| {
+            lsp_store.list_interactive_enum(
+                server_id,
+                interactive_resolve::InteractiveListEnumParams {
+                    source: "workspace/symbol".to_string(),
+                    config: Some(json!({ "limit": 1 })),
+                    query: "main".to_string(),
+                },
+                cx,
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        options.entries,
+        vec![interactive_resolve::FormEnumEntry {
+            value: "main".to_string(),
+            description: "Symbol main".to_string(),
+        }]
+    );
+}

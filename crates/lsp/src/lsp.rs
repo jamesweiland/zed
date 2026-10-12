@@ -1137,7 +1137,9 @@ impl LanguageServer {
                     "serverStatusNotification": true,
                     "localDocs": true,
                     "interactiveResolve": {
-                        "inputTypes": ["string", "bool", "number", "enum"]
+                        "inputTypes": [
+                            "string", "bool", "number", "enum", "file", "lazyEnum", "list"
+                        ]
                     },
                 })),
                 window: Some(WindowClientCapabilities {

@@ -6684,6 +6684,7 @@ pub struct PathMatchCandidateSet {
     pub candidates: Candidates,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Candidates {
     /// Only consider directories.
     Directories,

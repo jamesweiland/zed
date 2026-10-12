@@ -6667,7 +6667,7 @@ impl LspStore {
         cx: &mut Context<Self>,
     ) -> Task<Result<interactive_resolve::CommandResolveParams>> {
         let server =
-            match self.interactive_resolve_server(server_id, &params.execute_command.command) {
+            match self.interactive_resolve_server(server_id, Some(&params.execute_command.command)) {
                 Ok(server) => server,
                 Err(error) => return Task::ready(Err(error)),
             };
@@ -6689,7 +6689,7 @@ impl LspStore {
         cx: &mut Context<Self>,
     ) -> Task<Result<ProjectTransaction>> {
         let server =
-            match self.interactive_resolve_server(server_id, &params.execute_command.command) {
+            match self.interactive_resolve_server(server_id, Some(&params.execute_command.command)) {
                 Ok(server) => server,
                 Err(error) => return Task::ready(Err(error)),
             };
@@ -6719,10 +6719,33 @@ impl LspStore {
         })
     }
 
+    /// Queries the options of a lazy enum form field for the user's `query`.
+    pub fn list_interactive_enum(
+        &self,
+        server_id: LanguageServerId,
+        params: interactive_resolve::InteractiveListEnumParams,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<interactive_resolve::FormFieldTypeEnum>> {
+        let server = match self.interactive_resolve_server(server_id, None) {
+            Ok(server) => server,
+            Err(error) => return Task::ready(Err(error)),
+        };
+        let request_timeout = ProjectSettings::get_global(cx)
+            .global_lsp_settings
+            .get_request_timeout();
+        cx.background_spawn(async move {
+            server
+                .request::<interactive_resolve::InteractiveListEnum>(params, request_timeout)
+                .await
+                .into_response()
+        })
+    }
+
+    /// Returns the server for `server_id` if it supports interactive resolution, and advertises `command` when given.
     fn interactive_resolve_server(
         &self,
         server_id: LanguageServerId,
-        command: &str,
+        command: Option<&str>,
     ) -> Result<Arc<LanguageServer>> {
         if self.upstream_client().is_some() {
             return Err(anyhow!(
@@ -6736,15 +6759,16 @@ impl LspStore {
             .language_server_for_id(server_id)
             .with_context(|| format!("language server {server_id} not found"))?;
         let capabilities = server.capabilities();
-        if !capabilities
-            .execute_command_provider
-            .as_ref()
-            .is_some_and(|options| {
-                options
-                    .commands
-                    .iter()
-                    .any(|advertised| advertised == command)
-            })
+        if let Some(command) = command
+            && !capabilities
+                .execute_command_provider
+                .as_ref()
+                .is_some_and(|options| {
+                    options
+                        .commands
+                        .iter()
+                        .any(|advertised| advertised == command)
+                })
         {
             return Err(anyhow!(
                 "command {command} is not advertised by the language server"

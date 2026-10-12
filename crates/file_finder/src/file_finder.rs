@@ -3,7 +3,7 @@ mod file_finder_tests;
 #[cfg(test)]
 mod multi_select_tests;
 
-use futures::future::join_all;
+use futures::{channel::oneshot, future::join_all};
 pub use open_path_prompt::OpenPathDelegate;
 
 use channel::ChannelStore;
@@ -22,7 +22,8 @@ use language::{BufferSnapshot, Point};
 use open_path_prompt::{OpenPathPrompt, file_finder_settings::FileFinderSettings};
 use picker::{Picker, PickerDelegate};
 use project::{
-    PathMatchCandidateSet, Project, ProjectPath, WorktreeId, worktree_store::WorktreeStore,
+    Candidates, PathMatchCandidateSet, Project, ProjectPath, WorktreeId,
+    worktree_store::WorktreeStore,
 };
 
 use settings::{ModalWidthContent, SeedQuerySetting, Settings, SettingsStore};
@@ -81,6 +82,31 @@ impl FileFinder {
         _window: Option<&mut Window>,
         _: &mut Context<Workspace>,
     ) {
+        workspace.set_prompt_for_project_path(Box::new(|workspace, candidates, window, cx| {
+            let (answer_tx, answer_rx) = oneshot::channel();
+            let project = workspace.project().clone();
+            let weak_workspace = cx.entity().downgrade();
+            workspace.toggle_modal(window, cx, |window, cx| {
+                let mut delegate = FileFinderDelegate::new(
+                    cx.entity().downgrade(),
+                    weak_workspace,
+                    project,
+                    None,
+                    Vec::new(),
+                    false,
+                    None,
+                    window,
+                    cx,
+                );
+                delegate.channel_store = None;
+                delegate.path_picker = Some(PathPicker {
+                    candidates,
+                    answer_tx: Some(answer_tx),
+                });
+                FileFinder::new(delegate, None, window, cx)
+            });
+            answer_rx
+        }));
         workspace.register_action(
             |workspace, action: &workspace::ToggleFileFinder, window, cx| {
                 let Some(file_finder) = workspace.active_modal::<Self>(cx) else {
@@ -330,6 +356,9 @@ impl FileFinder {
     ) {
         self.picker.update(cx, |picker, cx| {
             let delegate = &mut picker.delegate;
+            if delegate.path_picker.is_some() {
+                return;
+            }
             if !delegate.selected_matches.is_empty() {
                 delegate.open_selected_in_one_split(split_direction, window, cx);
                 return;
@@ -432,6 +461,13 @@ pub struct FileFinderDelegate {
     include_ignored: Option<bool>,
     include_ignored_refresh: Task<()>,
     debounce_next_refresh: bool,
+    path_picker: Option<PathPicker>,
+}
+
+/// Set when the finder picks paths for a caller instead of opening them.
+struct PathPicker {
+    candidates: Candidates,
+    answer_tx: Option<oneshot::Sender<Option<Vec<PathBuf>>>>,
 }
 
 /// Use a custom ordering for file finder: the regular one
@@ -1047,6 +1083,7 @@ impl FileFinderDelegate {
             include_ignored: include_ignored.or(FileFinderSettings::get_global(cx).include_ignored),
             include_ignored_refresh: Task::ready(()),
             debounce_next_refresh: false,
+            path_picker: None,
         }
     }
 
@@ -1116,7 +1153,10 @@ impl FileFinderDelegate {
                         worktree.root_entry().is_some_and(|entry| entry.is_ignored)
                     }),
                     include_root_name,
-                    candidates: project::Candidates::Files,
+                    candidates: self
+                        .path_picker
+                        .as_ref()
+                        .map_or(Candidates::Files, |picker| picker.candidates),
                 }
             })
             .collect::<Vec<_>>();
@@ -1256,7 +1296,9 @@ impl FileFinderDelegate {
             }
 
             let query_path = query.path_query();
-            if let Ok(mut query_path) = RelPath::new(Path::new(query_path), path_style) {
+            if self.path_picker.is_none()
+                && let Ok(mut query_path) = RelPath::new(Path::new(query_path), path_style)
+            {
                 let available_worktree = self
                     .project
                     .read(cx)
@@ -1635,6 +1677,11 @@ impl FileFinderDelegate {
         window: &mut Window,
         cx: &mut Context<Picker<FileFinderDelegate>>,
     ) {
+        if self.path_picker.is_some() {
+            let abs_path = m.abs_path(&self.project, cx);
+            self.send_picked_paths(abs_path.into_iter().collect(), cx);
+            return;
+        }
         let Some(workspace) = self.workspace.upgrade() else {
             return;
         };
@@ -1772,8 +1819,24 @@ impl FileFinderDelegate {
         self.open_selected_file(false, false, window, cx);
     }
 
-    /// Opens every multi-selected file as a tab in a single new split, then
-    /// dismisses the finder.
+    fn send_picked_paths(
+        &mut self,
+        abs_paths: Vec<PathBuf>,
+        cx: &mut Context<Picker<FileFinderDelegate>>,
+    ) {
+        if let Some(answer_tx) = self
+            .path_picker
+            .as_mut()
+            .and_then(|picker| picker.answer_tx.take())
+        {
+            answer_tx.send(Some(abs_paths)).ok();
+        }
+        let finder = self.file_finder.clone();
+        cx.defer(move |cx| {
+            finder.update(cx, |_, cx| cx.emit(DismissEvent)).log_err();
+        });
+    }
+
     fn open_selected_in_one_split(
         &mut self,
         split_direction: SplitDirection,
@@ -2093,6 +2156,14 @@ impl PickerDelegate for FileFinderDelegate {
         cx: &mut Context<Picker<FileFinderDelegate>>,
     ) {
         let selected = std::mem::take(&mut self.selected_matches);
+        if self.path_picker.is_some() {
+            let abs_paths = selected
+                .iter()
+                .filter_map(|selected| selected.0.abs_path(&self.project, cx))
+                .collect();
+            self.send_picked_paths(abs_paths, cx);
+            return;
+        }
         let count = selected.len();
         for (i, selected_match) in selected.into_iter().enumerate() {
             let is_last = i + 1 == count;

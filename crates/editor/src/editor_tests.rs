@@ -50448,6 +50448,8 @@ async fn test_soft_wrap_indent_updated_on_file_move_between_directories(
 
 #[gpui::test]
 async fn test_interactive_code_action_resolves_command_before_executing(cx: &mut TestAppContext) {
+    use crate::interactive_command::{ChoiceDelegate, TextPrompt};
+    use picker::Picker;
     use project::lsp_store::interactive_resolve;
 
     init_test(cx, |_| {});
@@ -50495,14 +50497,52 @@ async fn test_interactive_code_action_resolves_command_before_executing(cx: &mut
         .set_request_handler::<interactive_resolve::CommandResolve, _, _>(
             |mut params, _| async move {
                 params.interactive.form_fields = if params.interactive.form_answers.is_empty() {
-                    vec![interactive_resolve::FormField {
-                        id: "name".to_string(),
-                        description: "the name".to_string(),
-                        field_type: interactive_resolve::FormFieldType::String,
-                        required: true,
-                        default: Some(json!("X")),
-                        error: None,
-                    }]
+                    vec![
+                        interactive_resolve::FormField {
+                            id: "name".to_string(),
+                            description: "the name".to_string(),
+                            field_type: interactive_resolve::FormFieldType::String,
+                            required: true,
+                            default: Some(json!("X")),
+                            error: None,
+                        },
+                        interactive_resolve::FormField {
+                            id: "transform".to_string(),
+                            description: "the transform".to_string(),
+                            field_type: interactive_resolve::FormFieldType::Enum(
+                                interactive_resolve::FormFieldTypeEnum {
+                                    name: None,
+                                    entries: vec![
+                                        interactive_resolve::FormEnumEntry {
+                                            value: "camel".to_string(),
+                                            description: "camelCase".to_string(),
+                                        },
+                                        interactive_resolve::FormEnumEntry {
+                                            value: "snake".to_string(),
+                                            description: "snake_case".to_string(),
+                                        },
+                                    ],
+                                },
+                            ),
+                            required: true,
+                            default: Some(json!("snake")),
+                            error: None,
+                        },
+                        interactive_resolve::FormField {
+                            id: "tags".to_string(),
+                            description: "the tags".to_string(),
+                            field_type: interactive_resolve::FormFieldType::List(
+                                interactive_resolve::FormFieldTypeList {
+                                    element_type: Box::new(
+                                        interactive_resolve::FormFieldType::String,
+                                    ),
+                                },
+                            ),
+                            required: true,
+                            default: None,
+                            error: None,
+                        },
+                    ]
                 } else {
                     Vec::new()
                 };
@@ -50519,10 +50559,20 @@ async fn test_interactive_code_action_resolves_command_before_executing(cx: &mut
                 async move {
                     assert_eq!(
                         params.interactive.form_answers,
-                        vec![interactive_resolve::FormAnswer {
-                            id: "name".to_string(),
-                            value: json!("X"),
-                        }]
+                        vec![
+                            interactive_resolve::FormAnswer {
+                                id: "name".to_string(),
+                                value: json!("X"),
+                            },
+                            interactive_resolve::FormAnswer {
+                                id: "transform".to_string(),
+                                value: json!("snake"),
+                            },
+                            interactive_resolve::FormAnswer {
+                                id: "tags".to_string(),
+                                value: json!(["json"]),
+                            },
+                        ]
                     );
                     server
                         .request::<lsp::request::ApplyWorkspaceEdit>(
@@ -50561,6 +50611,33 @@ async fn test_interactive_code_action_resolves_command_before_executing(cx: &mut
             editor.confirm_code_action(&ConfirmCodeAction { item_ix: Some(0) }, window, cx)
         })
         .expect("confirming a code action should spawn a task");
+
+    // Each field gets its own prompt, pre-filled from the field's default.
+    cx.run_until_parked();
+    assert!(
+        cx.update_workspace(|workspace, _, cx| workspace.active_modal::<TextPrompt>(cx))
+            .is_some(),
+        "the name should be asked with a text prompt"
+    );
+    cx.dispatch_action(menu::Confirm);
+
+    cx.run_until_parked();
+    assert!(
+        cx.update_workspace(|workspace, _, cx| {
+            workspace.active_modal::<Picker<ChoiceDelegate>>(cx)
+        })
+        .is_some(),
+        "the transform should be asked with a choice prompt"
+    );
+    cx.dispatch_action(menu::Confirm);
+
+    // List elements are prompted one by one until the user finishes with an empty answer.
+    cx.run_until_parked();
+    cx.simulate_input("json");
+    cx.dispatch_action(menu::Confirm);
+    cx.run_until_parked();
+    cx.dispatch_action(menu::Confirm);
+
     confirm.await.unwrap();
     assert_eq!(cx.buffer_text(), "Xfn main() {}");
 }

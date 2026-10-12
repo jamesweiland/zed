@@ -98,8 +98,8 @@ pub use persistence::{
 use persistence::{SerializedWindowBounds, model::SerializedWorkspace};
 use postage::stream::Stream;
 use project::{
-    DirectoryLister, Project, ProjectEntryId, ProjectPath, ResolvedPath, Worktree, WorktreeId,
-    WorktreeSettings,
+    Candidates, DirectoryLister, Project, ProjectEntryId, ProjectPath, ResolvedPath, Worktree,
+    WorktreeId, WorktreeSettings,
     debugger::{breakpoint_store::BreakpointStoreEvent, session::ThreadStatus},
     git_store::{GitStoreEvent, RepositoryEvent},
     project_settings::ProjectSettings,
@@ -1564,6 +1564,15 @@ type PromptForOpenPath = Box<
     ) -> oneshot::Receiver<Option<Vec<PathBuf>>>,
 >;
 
+type PromptForProjectPath = Box<
+    dyn Fn(
+        &mut Workspace,
+        Candidates,
+        &mut Window,
+        &mut Context<Workspace>,
+    ) -> oneshot::Receiver<Option<Vec<PathBuf>>>,
+>;
+
 #[derive(Default)]
 struct DispatchingKeystrokes {
     dispatched: HashSet<Vec<Keystroke>>,
@@ -1629,6 +1638,7 @@ pub struct Workspace {
     bounds_save_task_queued: Option<Task<()>>,
     on_prompt_for_new_path: Option<PromptForNewPath>,
     on_prompt_for_open_path: Option<PromptForOpenPath>,
+    on_prompt_for_project_path: Option<PromptForProjectPath>,
     terminal_provider: Option<Box<dyn TerminalProvider>>,
     debugger_provider: Option<Arc<dyn DebuggerProvider>>,
     serializable_items_tx: UnboundedSender<Box<dyn SerializableItemHandle>>,
@@ -2137,6 +2147,7 @@ impl Workspace {
             bounds_save_task_queued: None,
             on_prompt_for_new_path: None,
             on_prompt_for_open_path: None,
+            on_prompt_for_project_path: None,
             terminal_provider: None,
             debugger_provider: None,
             serializable_items_tx,
@@ -3335,6 +3346,27 @@ impl Workspace {
 
     pub fn set_prompt_for_open_path(&mut self, prompt: PromptForOpenPath) {
         self.on_prompt_for_open_path = Some(prompt)
+    }
+
+    pub fn set_prompt_for_project_path(&mut self, prompt: PromptForProjectPath) {
+        self.on_prompt_for_project_path = Some(prompt)
+    }
+
+    /// Lets the user pick existing entries of the project's worktrees with the file finder.
+    pub fn prompt_for_project_path(
+        &mut self,
+        candidates: Candidates,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> oneshot::Receiver<Option<Vec<PathBuf>>> {
+        let Some(prompt) = self.on_prompt_for_project_path.take() else {
+            let (tx, rx) = oneshot::channel();
+            tx.send(None).ok();
+            return rx;
+        };
+        let rx = prompt(self, candidates, window, cx);
+        self.on_prompt_for_project_path = Some(prompt);
+        rx
     }
 
     pub fn set_terminal_provider(&mut self, provider: impl TerminalProvider + 'static) {
