@@ -39,7 +39,7 @@ pub enum InteractiveListEnum {}
 
 impl lsp::request::Request for InteractiveListEnum {
     type Params = InteractiveListEnumParams;
-    type Result = FormFieldTypeEnum;
+    type Result = Vec<FormEnumEntry>;
     const METHOD: &'static str = "interactive/listEnum";
 }
 

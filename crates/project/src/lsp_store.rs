@@ -6666,11 +6666,12 @@ impl LspStore {
         params: interactive_resolve::CommandResolveParams,
         cx: &mut Context<Self>,
     ) -> Task<Result<interactive_resolve::CommandResolveParams>> {
-        let server =
-            match self.interactive_resolve_server(server_id, Some(&params.execute_command.command)) {
-                Ok(server) => server,
-                Err(error) => return Task::ready(Err(error)),
-            };
+        let server = match self
+            .interactive_resolve_server(server_id, Some(&params.execute_command.command))
+        {
+            Ok(server) => server,
+            Err(error) => return Task::ready(Err(error)),
+        };
         let request_timeout = ProjectSettings::get_global(cx)
             .global_lsp_settings
             .get_request_timeout();
@@ -6688,11 +6689,12 @@ impl LspStore {
         params: interactive_resolve::CommandResolveParams,
         cx: &mut Context<Self>,
     ) -> Task<Result<ProjectTransaction>> {
-        let server =
-            match self.interactive_resolve_server(server_id, Some(&params.execute_command.command)) {
-                Ok(server) => server,
-                Err(error) => return Task::ready(Err(error)),
-            };
+        let server = match self
+            .interactive_resolve_server(server_id, Some(&params.execute_command.command))
+        {
+            Ok(server) => server,
+            Err(error) => return Task::ready(Err(error)),
+        };
         if let Some(local) = self.as_local_mut() {
             local
                 .last_workspace_edits_by_language_server
@@ -6725,7 +6727,7 @@ impl LspStore {
         server_id: LanguageServerId,
         params: interactive_resolve::InteractiveListEnumParams,
         cx: &mut Context<Self>,
-    ) -> Task<Result<interactive_resolve::FormFieldTypeEnum>> {
+    ) -> Task<Result<Vec<interactive_resolve::FormEnumEntry>>> {
         let server = match self.interactive_resolve_server(server_id, None) {
             Ok(server) => server,
             Err(error) => return Task::ready(Err(error)),

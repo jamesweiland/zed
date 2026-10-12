@@ -654,7 +654,7 @@ impl PickerDelegate for ChoiceDelegate {
                     lsp_store.list_interactive_enum(*server_id, params, cx)
                 });
                 cx.spawn_in(window, async move |picker, cx| {
-                    let entries = options.await.log_err().map(|options| options.entries);
+                    let entries = options.await.log_err();
                     picker
                         .update(cx, |picker, cx| {
                             let matches = entries

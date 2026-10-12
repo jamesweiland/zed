@@ -1409,13 +1409,10 @@ async fn test_list_interactive_enum(cx: &mut TestAppContext) {
         |params, _| async move {
             assert_eq!(params.source, "workspace/symbol");
             assert_eq!(params.config, Some(json!({ "limit": 1 })));
-            Ok(interactive_resolve::FormFieldTypeEnum {
-                name: None,
-                entries: vec![interactive_resolve::FormEnumEntry {
+            Ok(vec![interactive_resolve::FormEnumEntry {
                     value: params.query.clone(),
                     description: format!("Symbol {}", params.query),
-                }],
-            })
+                }]
         },
     );
     let options = lsp_store
